@@ -143,6 +143,9 @@ def handle_challenge_timeout(bot, chat, user, bot_msg):
 
     if group_config['challenge_timeout_action'] == 'ban':
         bot.kick_chat_member(chat, user)
+    elif group_config['challenge_timeout_action'] == 'kick':
+        bot.kick_chat_member(chat, user)
+        bot.unban_chat_member(chat, user)
     else:  # restrict
         # assume that the user is already restricted (when joining the group)
         pass
@@ -215,8 +218,8 @@ def handle_challenge_response(bot, update):
                 reply_mark=None)
             bot.send_message(
                 chat_id=int(channel),
-                text='User ' + str(target) +
-                ' has passed the captcha by admins.\nGroup id:' + str(chat))
+                text=config['msg_passed_admin'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+                parse_mode='Markdown')
         else:  # query['data'] == '-'
             try:
                 bot.kick_chat_member(chat, target)
@@ -232,8 +235,8 @@ def handle_challenge_response(bot, update):
                 reply_mark=None)
             bot.send_message(
                 chat_id=int(channel),
-                text='User ' + str(target) +
-                ' has failed the captcha by admins.\nGroup id:' + str(chat))
+                text=config['msg_failed_admin'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+                parse_mode='Markdown')
 
         bot.answer_callback_query(callback_query_id=query['id'])
 
@@ -287,8 +290,8 @@ def handle_challenge_response(bot, update):
             reply_mark=None)
         bot.send_message(
             chat_id=int(channel),
-            text='User ' + str(target) + ' has passed the captcha \nGroup id:'
-            + str(chat))
+            text=config['msg_passed_answer'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+            parse_mode='Markdown')
     else:
         # 如果回答错误，进入严格模式和非严格模式的判断。
         if group_config["use_strict_mode"] == False:
@@ -300,8 +303,8 @@ def handle_challenge_response(bot, update):
                 reply_mark=None)
             bot.send_message(
                 chat_id=int(channel),
-                text='User ' + str(target) +
-                ' has mercyfully passed the captcha\nGroup id:' + str(chat))
+                text=config['msg_passed_mercy'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+                parse_mode='Markdown')
         else:
             # 启用了严格模式
             try:
@@ -319,9 +322,8 @@ def handle_challenge_response(bot, update):
                     can_add_web_page_previews=False)
                 bot.send_message(
                     chat_id=int(channel),
-                    text='User ' + str(target) +
-                    ' has failed the captcha\nGroup id:' + str(chat) +
-                    ' \nreason:Wrong answer.')
+                    text=config['msg_failed_answer'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+                    parse_mode='Markdown')
             except TelegramError:
                 # it is very possible that the message has been deleted
                 # so assume the case has been dealt by group admins, simply ignore it
