@@ -4,6 +4,7 @@ import logging
 import threading
 from time import time, sleep
 from challenge import Challenge
+from captcha.image import ImageCaptcha
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Updater, MessageHandler, CallbackQueryHandler, Filters
 from telegram.error import TelegramError
@@ -98,12 +99,23 @@ def challenge_user(bot, update):
 
     timeout = group_config['challenge_timeout']
 
-    bot_msg = bot.send_message(
-        chat_id=msg.chat.id,
-        text=group_config['msg_challenge'].format(
-            timeout=timeout, challenge=challenge.qus()),
-        reply_to_message_id=msg.message_id,
-        reply_markup=InlineKeyboardMarkup(challenge_to_buttons(challenge)))
+    if group_config['use_image_captcha'] == False:
+        bot_msg = bot.send_photo(
+            chat_id=msg.chat.id,
+            text=group_config['msg_challenge'].format(
+                timeout=timeout, challenge=challenge.qus()),
+            reply_to_message_id=msg.message_id,
+            reply_markup=InlineKeyboardMarkup(challenge_to_buttons(challenge)))
+    else:
+        image = ImageCaptcha()
+        image_file = group_config['captcha_image_save_dir'] + str(int(time())) + '.png'
+        image.write(challenge.qus(), image_file)
+        bot_msg = bot.send_photo(
+            chat_id=msg.chat.id, photo=open(image_file, 'rb'),
+            caption=group_config['msg_challenge_image'].format(
+                timeout=timeout, challenge=challenge.qus()),
+            reply_to_message_id=msg.message_id,
+            reply_markup=InlineKeyboardMarkup(challenge_to_buttons(challenge)))
     # 给入群的用户发验证消息
 
     timeout_event = challenge_sched.enter(
