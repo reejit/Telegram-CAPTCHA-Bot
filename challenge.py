@@ -19,14 +19,14 @@ class Challenge:
         if operation in ['+', '-']:
             a, b = random.randint(0, 50), random.randint(0, 50)
             a, b = max(a, b), min(a, b)
-            ans = a+b if operation == '+' else a-b
+            ans = a + b if operation == '+' else a - b
         elif operation == '*':
             a, b = random.randint(0, 9), random.randint(0, 9)
-            ans = a*b
+            ans = a * b
         elif operation == '/':
             a, b = random.randint(0, 9), random.randint(1, 9)
             ans = a
-            a = a*b
+            a = a * b
 
         cases = random.randint(3, 5)
         choices = random.sample(range(100), cases)

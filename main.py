@@ -4,6 +4,7 @@ import logging
 import threading
 from time import time, sleep
 from challenge import Challenge
+from captcha.image import ImageCaptcha
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Updater, MessageHandler, CallbackQueryHandler, Filters
 from telegram.error import TelegramError
@@ -98,204 +99,202 @@ def challenge_user(bot, update):
 
     timeout = group_config['challenge_timeout']
 
-    bot_msg = bot.send_message(
-        chat_id=msg.chat.id,
-        text=group_config['msg_challenge'].format(
-            timeout=timeout, challenge=challenge.qus()),
-        reply_to_message_id=msg.message_id,
-        reply_markup=InlineKeyboardMarkup(challenge_to_buttons(challenge)))
-    # 给入群的用户发验证消息
+    if group_config['use_image_captcha'] == False:
+        bot_msg = bot.send_message(
+            chat_id=msg.chat.id,
+            text=group_config['msg_challenge'].format(
+                timeout=timeout, challenge=challenge.qus()),
+            reply_to_message_id=msg.message_id,
+            reply_markup=InlineKeyboardMarkup(challenge_to_buttons(challenge)))
+    else:
+        image = ImageCaptcha()
+        image_file = group_config['captcha_image_save_dir'] + str(int(time())) + '.png'
+        image.write(challenge.qus(), image_file)
+        bot_msg = bot.send_message(
+            chat_id=msg.chat.id, photo=open(image_file, 'rb'),
+            text=group_config['msg_challenge'].format(
+                timeout=timeout, challenge=challenge.qus()),
+            reply_to_message_id=msg.message_id,
+            reply_markup=InlineKeyboardMarkup(challenge_to_buttons(challenge)))
+        # 给入群的用户发验证消息
 
-    timeout_event = challenge_sched.enter(
-        group_config['challenge_timeout'],
-        10,
-        handle_challenge_timeout,
-        argument=(bot, msg.chat.id, msg.from_user.id, bot_msg.message_id))
+        timeout_event = challenge_sched.enter(
+            group_config['challenge_timeout'],
+            10,
+            handle_challenge_timeout,
+            argument=(bot, msg.chat.id, msg.from_user.id, bot_msg.message_id))
 
-    cch_lock.acquire()
-    current_challenges['{chat}|{msg}'.format(
-        chat=msg.chat.id,
-        msg=bot_msg.message_id)] = (challenge, msg.from_user.id, timeout_event)
-    cch_lock.release()
+        cch_lock.acquire()
+        current_challenges['{chat}|{msg}'.format(
+            chat=msg.chat.id,
+            msg=bot_msg.message_id)] = (challenge, msg.from_user.id, timeout_event)
+        cch_lock.release()
 
+    def handle_challenge_timeout(bot, chat, user, bot_msg):
+        global config, current_challenges
 
-def handle_challenge_timeout(bot, chat, user, bot_msg):
-    global config, current_challenges
+        config_lock.acquire()
+        group_config = config.get(str(chat), config['*'])
+        config_lock.release()
 
-    config_lock.acquire()
-    group_config = config.get(str(chat), config['*'])
-    config_lock.release()
+        cch_lock.acquire()
+        del current_challenges['{chat}|{msg}'.format(chat=chat, msg=bot_msg)]
+        cch_lock.release()
 
-    cch_lock.acquire()
-    del current_challenges['{chat}|{msg}'.format(chat=chat, msg=bot_msg)]
-    cch_lock.release()
+        try:
+            bot.edit_message_text(
+                group_config['msg_challenge_failed'],
+                chat_id=chat,
+                message_id=bot_msg,
+                reply_markup=None)
+        except TelegramError:
+            # it is very possible that the message has been deleted
+            # so assume the case has been dealt by group admins, simply ignore it
+            return None
 
-    try:
-        bot.edit_message_text(
-            group_config['msg_challenge_failed'],
-            chat_id=chat,
-            message_id=bot_msg,
-            reply_markup=None)
-    except TelegramError:
-        # it is very possible that the message has been deleted
-        # so assume the case has been dealt by group admins, simply ignore it
-        return None
+        if group_config['challenge_timeout_action'] == 'ban':
+            bot.kick_chat_member(chat, user)
+        elif group_config['challenge_timeout_action'] == 'kick':
+            bot.kick_chat_member(chat, user)
+            bot.unban_chat_member(chat, user)
+        else:  # restrict
+            # assume that the user is already restricted (when joining the group)
+            pass
 
-    if group_config['challenge_timeout_action'] == 'ban':
-        bot.kick_chat_member(chat, user)
-    elif group_config['challenge_timeout_action'] == 'kick':
-        bot.kick_chat_member(chat, user)
-        bot.unban_chat_member(chat, user)
-    else:  # restrict
-        # assume that the user is already restricted (when joining the group)
-        pass
+        if group_config['delete_failed_challenge']:
+            challenge_sched.enter(
+                group_config['delete_failed_challenge_interval'],
+                1,
+                bot.delete_message,
+                argument=(chat, bot_msg))
 
-    if group_config['delete_failed_challenge']:
-        challenge_sched.enter(
-            group_config['delete_failed_challenge_interval'],
-            1,
-            bot.delete_message,
-            argument=(chat, bot_msg))
+    def handle_challenge_response(bot, update):
+        global config, current_challenges
 
+        query = update['callback_query']
+        user_ans = query['data']
 
-def handle_challenge_response(bot, update):
-    global config, current_challenges
+        chat = update.effective_chat.id
+        user = update.effective_user.id
+        username = update.effective_user.name
+        bot_msg = update.effective_message.message_id
 
-    query = update['callback_query']
-    user_ans = query['data']
+        config_lock.acquire()
+        group_config = config.get(str(chat), config['*'])
+        config_lock.release()
 
-    chat = update.effective_chat.id
-    user = update.effective_user.id
-    username = update.effective_user.name
-    bot_msg = update.effective_message.message_id
-
-    config_lock.acquire()
-    group_config = config.get(str(chat), config['*'])
-    config_lock.release()
-
-    # 这里还是用于手动控制入群的批准与拒绝用的
-    if query['data'] in ['+', '-']:
-        admins = bot.get_chat_administrators(chat)
-        # the creator case must be special judged
-        if not any([
+        # 这里还是用于手动控制入群的批准与拒绝用的
+        if query['data'] in ['+', '-']:
+            admins = bot.get_chat_administrators(chat)
+            # the creator case must be special judged
+            if not any([
                 admin.user.id == user and
-            (admin.can_restrict_members or admin.status == 'creator')
+                (admin.can_restrict_members or admin.status == 'creator')
                 for admin in admins
                 # 如果不是创建者或者是管理员，就返回权限不足的提示
-        ]):
-            bot.answer_callback_query(
-                callback_query_id=query['id'],
-                text=group_config['msg_permission_denied'])
+            ]):
+                bot.answer_callback_query(
+                    callback_query_id=query['id'],
+                    text=group_config['msg_permission_denied'])
+                return None
+
+            ch_id = '{chat}|{msg}'.format(chat=chat, msg=bot_msg)
+            cch_lock.acquire()
+            challenge, target, timeout_event = current_challenges.get(
+                ch_id, (None, None, None))
+            del current_challenges[ch_id]
+            cch_lock.release()
+            challenge_sched.cancel(timeout_event)
+
+            if query['data'] == '+':
+                # 解除限制。
+                try:
+                    bot.restrict_chat_member(
+                        chat,
+                        target,
+                        can_send_messages=True,
+                        can_send_media_messages=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True)
+                except TelegramError:
+                    bot.answer_callback_query(
+                        callback_query_id=query['id'],
+                        text=group_config['msg_bot_no_permission'])
+                    return None
+                bot.edit_message_text(
+                    group_config['msg_approved'].format(user=username),
+                    chat_id=chat,
+                    message_id=bot_msg,
+                    reply_mark=None)
+                bot.send_message(
+                    chat_id=int(channel),
+                    text=config['msg_passed_admin'].format(botid=str(bot.get_me().id), targetuser=str(target),
+                                                           groupid=str(chat)),
+                    parse_mode='Markdown')
+            else:  # query['data'] == '-'
+                try:
+                    bot.kick_chat_member(chat, target)
+                except TelegramError:
+                    bot.answer_callback_query(
+                        callback_query_id=query['id'],
+                        text=group_config['msg_bot_no_permission'])
+                    return None
+                bot.edit_message_text(
+                    group_config['msg_refused'].format(user=username),
+                    chat_id=chat,
+                    message_id=bot_msg,
+                    reply_mark=None)
+                bot.send_message(
+                    chat_id=int(channel),
+                    text=config['msg_failed_admin'].format(botid=str(bot.get_me().id), targetuser=str(target),
+                                                           groupid=str(chat)),
+                    parse_mode='Markdown')
+
+            bot.answer_callback_query(callback_query_id=query['id'])
+
             return None
 
         ch_id = '{chat}|{msg}'.format(chat=chat, msg=bot_msg)
         cch_lock.acquire()
         challenge, target, timeout_event = current_challenges.get(
             ch_id, (None, None, None))
-        del current_challenges[ch_id]
         cch_lock.release()
+
+        if user != target:
+            bot.answer_callback_query(
+                callback_query_id=query['id'],
+                text=group_config['msg_challenge_not_for_you'])
+            return None
+
         challenge_sched.cancel(timeout_event)
 
-        if query['data'] == '+':
-            # 解除限制。
-            try:
-                bot.restrict_chat_member(
-                    chat,
-                    target,
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True)
-            except TelegramError:
-                bot.answer_callback_query(
-                    callback_query_id=query['id'],
-                    text=group_config['msg_bot_no_permission'])
-                return None
-            bot.edit_message_text(
-                group_config['msg_approved'].format(user=username),
-                chat_id=chat,
-                message_id=bot_msg,
-                reply_mark=None)
-            bot.send_message(
-                chat_id=int(channel),
-                text=config['msg_passed_admin'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
-                parse_mode='Markdown')
-        else:  # query['data'] == '-'
-            try:
-                bot.kick_chat_member(chat, target)
-            except TelegramError:
-                bot.answer_callback_query(
-                    callback_query_id=query['id'],
-                    text=group_config['msg_bot_no_permission'])
-                return None
-            bot.edit_message_text(
-                group_config['msg_refused'].format(user=username),
-                chat_id=chat,
-                message_id=bot_msg,
-                reply_mark=None)
-            bot.send_message(
-                chat_id=int(channel),
-                text=config['msg_failed_admin'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
-                parse_mode='Markdown')
+        cch_lock.acquire()
+        del current_challenges[ch_id]
+        cch_lock.release()
+
+        # lift the restriction
+        try:
+            bot.restrict_chat_member(
+                chat,
+                target,
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True)
+        except TelegramError:
+            # This my happen when the bot is deop-ed after the user join
+            # and before the user click the button
+            # TODO: design messages for this occation
+            pass
 
         bot.answer_callback_query(callback_query_id=query['id'])
 
-        return None
+        # verify the ans
+        correct = (str(challenge.ans()) == query['data'])
+        # 非严格模式下
 
-    ch_id = '{chat}|{msg}'.format(chat=chat, msg=bot_msg)
-    cch_lock.acquire()
-    challenge, target, timeout_event = current_challenges.get(
-        ch_id, (None, None, None))
-    cch_lock.release()
-
-    if user != target:
-        bot.answer_callback_query(
-            callback_query_id=query['id'],
-            text=group_config['msg_challenge_not_for_you'])
-        return None
-
-    challenge_sched.cancel(timeout_event)
-
-    cch_lock.acquire()
-    del current_challenges[ch_id]
-    cch_lock.release()
-
-    # lift the restriction
-    try:
-        bot.restrict_chat_member(
-            chat,
-            target,
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True)
-    except TelegramError:
-        # This my happen when the bot is deop-ed after the user join
-        # and before the user click the button
-        # TODO: design messages for this occation
-        pass
-
-    bot.answer_callback_query(callback_query_id=query['id'])
-
-    # verify the ans
-    correct = (str(challenge.ans()) == query['data'])
-    # 非严格模式下
-
-    if correct:
-        msg = 'msg_challenge_passed'
-        bot.edit_message_text(
-            group_config[msg],
-            chat_id=chat,
-            message_id=bot_msg,
-            reply_mark=None)
-        bot.send_message(
-            chat_id=int(channel),
-            text=config['msg_passed_answer'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
-            parse_mode='Markdown')
-    else:
-        # 如果回答错误，进入严格模式和非严格模式的判断。
-        if group_config["use_strict_mode"] == False:
-            msg = 'msg_challenge_mercy_passed'
+        if correct:
+            msg = 'msg_challenge_passed'
             bot.edit_message_text(
                 group_config[msg],
                 chat_id=chat,
@@ -303,85 +302,99 @@ def handle_challenge_response(bot, update):
                 reply_mark=None)
             bot.send_message(
                 chat_id=int(channel),
-                text=config['msg_passed_mercy'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+                text=config['msg_passed_answer'].format(botid=str(bot.get_me().id), targetuser=str(target),
+                                                        groupid=str(chat)),
                 parse_mode='Markdown')
         else:
-            # 启用了严格模式
-            try:
+            # 如果回答错误，进入严格模式和非严格模式的判断。
+            if group_config["use_strict_mode"] == False:
+                msg = 'msg_challenge_mercy_passed'
                 bot.edit_message_text(
-                    group_config['msg_challenge_failed'],
+                    group_config[msg],
                     chat_id=chat,
                     message_id=bot_msg,
-                    reply_markup=None)
-                bot.restrict_chat_member(
-                    chat,
-                    target,
-                    can_send_messages=False,
-                    can_send_media_messages=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False)
+                    reply_mark=None)
                 bot.send_message(
                     chat_id=int(channel),
-                    text=config['msg_failed_answer'].format(botid=str(bot.get_me().id),targetuser=str(target),groupid=str(chat)),
+                    text=config['msg_passed_mercy'].format(botid=str(bot.get_me().id), targetuser=str(target),
+                                                           groupid=str(chat)),
                     parse_mode='Markdown')
-            except TelegramError:
-                # it is very possible that the message has been deleted
-                # so assume the case has been dealt by group admins, simply ignore it
-                return None
+            else:
+                # 启用了严格模式
+                try:
+                    bot.edit_message_text(
+                        group_config['msg_challenge_failed'],
+                        chat_id=chat,
+                        message_id=bot_msg,
+                        reply_markup=None)
+                    bot.restrict_chat_member(
+                        chat,
+                        target,
+                        can_send_messages=False,
+                        can_send_media_messages=False,
+                        can_send_other_messages=False,
+                        can_add_web_page_previews=False)
+                    bot.send_message(
+                        chat_id=int(channel),
+                        text=config['msg_failed_answer'].format(botid=str(bot.get_me().id), targetuser=str(target),
+                                                                groupid=str(chat)),
+                        parse_mode='Markdown')
+                except TelegramError:
+                    # it is very possible that the message has been deleted
+                    # so assume the case has been dealt by group admins, simply ignore it
+                    return None
 
-            if group_config['challenge_timeout_action'] == 'ban':
-                bot.kick_chat_member(chat, user)
-            elif group_config['challenge_timeout_action'] == 'kick':
-                bot.kick_chat_member(chat, user)
-                bot.unban_chat_member(chat, user)
-            else:  # restrict
-                # assume that the user is already restricted (when joining the group)
-                pass
+                if group_config['challenge_timeout_action'] == 'ban':
+                    bot.kick_chat_member(chat, user)
+                elif group_config['challenge_timeout_action'] == 'kick':
+                    bot.kick_chat_member(chat, user)
+                    bot.unban_chat_member(chat, user)
+                else:  # restrict
+                    # assume that the user is already restricted (when joining the group)
+                    pass
 
-            if group_config['delete_failed_challenge']:
-                challenge_sched.enter(
-                    group_config['delete_failed_challenge_interval'],
-                    1,
-                    bot.delete_message,
-                    argument=(chat, bot_msg))
+                if group_config['delete_failed_challenge']:
+                    challenge_sched.enter(
+                        group_config['delete_failed_challenge_interval'],
+                        1,
+                        bot.delete_message,
+                        argument=(chat, bot_msg))
 
-    if group_config['delete_passed_challenge']:
-        challenge_sched.enter(
-            group_config['delete_passed_challenge_interval'],
-            5,
-            bot.delete_message,
-            argument=(chat, bot_msg))
+        if group_config['delete_passed_challenge']:
+            challenge_sched.enter(
+                group_config['delete_passed_challenge_interval'],
+                5,
+                bot.delete_message,
+                argument=(chat, bot_msg))
 
+    def main():
+        global updater, dispatcher, channel
 
-def main():
-    global updater, dispatcher, channel
+        load_config()
+        updater = Updater(config['token'])
+        channel = config['channel']
+        dispatcher = updater.dispatcher
 
-    load_config()
-    updater = Updater(config['token'])
-    channel = config['channel']
-    dispatcher = updater.dispatcher
+        challenge_handler = MessageHandler(Filters.status_update.new_chat_members,
+                                           challenge_user)
+        callback_handler = CallbackQueryHandler(handle_challenge_response)
+        dispatcher.add_handler(challenge_handler)
+        dispatcher.add_handler(callback_handler)
 
-    challenge_handler = MessageHandler(Filters.status_update.new_chat_members,
-                                       challenge_user)
-    callback_handler = CallbackQueryHandler(handle_challenge_response)
-    dispatcher.add_handler(challenge_handler)
-    dispatcher.add_handler(callback_handler)
+        updater.start_polling()
 
-    updater.start_polling()
+        def run_sched():
+            while True:
+                challenge_sched.run(blocking=False)
+                sleep(1)
 
-    def run_sched():
+        threading.Thread(target=run_sched, name="run_challenge_sched").start()
         while True:
-            challenge_sched.run(blocking=False)
-            sleep(1)
+            try:
+                sleep(600)
+            except KeyboardInterrupt:
+                save_config()
+                exit(0)
 
-    threading.Thread(target=run_sched, name="run_challenge_sched").start()
-    while True:
-        try:
-            sleep(600)
-        except KeyboardInterrupt:
-            save_config()
-            exit(0)
-
-
-if __name__ == '__main__':
-    main()
+    if __name__ == '__main__':
+        main()
