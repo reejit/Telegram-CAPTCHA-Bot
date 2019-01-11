@@ -100,7 +100,7 @@ def challenge_user(bot, update):
     timeout = group_config['challenge_timeout']
 
     if group_config['use_image_captcha'] == False:
-        bot_msg = bot.send_photo(
+        bot_msg = bot.send_message(
             chat_id=msg.chat.id,
             text=group_config['msg_challenge'].format(
                 timeout=timeout, challenge=challenge.qus()),
