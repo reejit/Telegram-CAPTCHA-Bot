@@ -2,6 +2,9 @@
 
 一个用于验证新成员是不是真人的bot。
 
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/reejit/Telegram-CAPTCHA-Bot.git)
+
+
 ![](https://img.shields.io/badge/license-AGPL3.0-%23373737.svg) ![https://python.org](https://img.shields.io/badge/python-3.6%2B-blue.svg) ![https://github.com/pyrogram/pyrogram/](https://img.shields.io/badge/Pyrogram-asyncio-green.svg)
 
 A bot running on Telegram which will send CAPTCHA to verify if the new member is a human.
